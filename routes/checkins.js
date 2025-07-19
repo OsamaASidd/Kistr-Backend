@@ -19,10 +19,12 @@ router.get('/employee-checkins', authenticateToken, [
 
         let whereClause = 'WHERE 1=1';
         let queryParams = [];
+        let paramIndex = 1;
 
         if (userId) {
-            whereClause += ' AND ec.user_id = ?';
+            whereClause += ` AND ec.user_id = $${paramIndex}`;
             queryParams.push(userId);
+            paramIndex++;
         }
 
         // Get total count
@@ -31,8 +33,8 @@ router.get('/employee-checkins', authenticateToken, [
             FROM employee_checkins ec 
             ${whereClause}
         `;
-        const [countResult] = await pool.execute(countQuery, queryParams);
-        const total = countResult[0].total;
+        const countResult = await pool.query(countQuery, queryParams);
+        const total = parseInt(countResult.rows[0].total);
 
         // Get paginated data with employee names
         const dataQuery = `
@@ -53,16 +55,16 @@ router.get('/employee-checkins', authenticateToken, [
             JOIN users u ON ec.user_id = u.id
             ${whereClause}
             ORDER BY ec.checkin_date DESC, ec.checkin_time DESC
-            LIMIT ? OFFSET ?
+            LIMIT $${paramIndex} OFFSET $${paramIndex + 1}
         `;
 
-        const [checkins] = await pool.execute(dataQuery, [...queryParams, perPage, offset]);
+        const checkins = await pool.query(dataQuery, [...queryParams, perPage, offset]);
 
         const totalPages = Math.ceil(total / perPage);
 
         res.json({
             body: {
-                data: checkins,
+                data: checkins.rows,
                 meta: {
                     current_page: page,
                     per_page: perPage,
@@ -84,20 +86,20 @@ router.post('/employee-checkins', authenticateToken, async (req, res) => {
         const today = new Date().toISOString().split('T')[0];
 
         // Check if user already has a check-in for today
-        const [existingCheckin] = await pool.execute(
-            'SELECT id FROM employee_checkins WHERE user_id = ? AND checkin_date = ?',
+        const existingCheckin = await pool.query(
+            'SELECT id FROM employee_checkins WHERE user_id = $1 AND checkin_date = $2',
             [userId, today]
         );
 
-        if (existingCheckin.length > 0) {
+        if (existingCheckin.rows.length > 0) {
             return res.status(400).json({ 
                 message: 'You have already checked in today' 
             });
         }
 
-        // Create new check-in using stored procedure
-        const [result] = await pool.execute('CALL CreateCheckin(?)', [userId]);
-        const checkinId = result[0][0].checkin_id;
+        // Create new check-in using function
+        const result = await pool.query('SELECT * FROM create_checkin($1)', [userId]);
+        const checkinId = result.rows[0].checkin_id;
 
         res.status(201).json({
             message: 'Check-in successful',
@@ -123,8 +125,8 @@ router.put('/employee-checkins/:id', authenticateToken, async (req, res) => {
             return res.status(400).json({ message: 'Invalid status type' });
         }
 
-        // Use stored procedure to update checkin status
-        await pool.execute('CALL UpdateCheckinStatus(?, ?)', [checkinId, type]);
+        // Use function to update checkin status
+        await pool.query('SELECT update_checkin_status($1, $2)', [checkinId, type]);
 
         let message = '';
         switch (type) {
@@ -151,7 +153,7 @@ router.get('/get-employee-checkin', authenticateToken, async (req, res) => {
     try {
         const userId = req.user.id;
         
-        const [checkins] = await pool.execute(`
+        const checkins = await pool.query(`
             SELECT 
                 checkin_date,
                 checkin_time,
@@ -161,14 +163,14 @@ router.get('/get-employee-checkin', authenticateToken, async (req, res) => {
                 total_daily_hours,
                 status
             FROM employee_checkins 
-            WHERE user_id = ?
+            WHERE user_id = $1
             ORDER BY checkin_date DESC
             LIMIT 30
         `, [userId]);
 
         res.json({
             body: {
-                data: checkins
+                data: checkins.rows
             }
         });
     } catch (error) {

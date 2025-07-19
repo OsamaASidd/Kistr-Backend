@@ -1,8 +1,13 @@
+require('dotenv').config();
+
 const pool = require('../config/database');
 const fs = require('fs');
 const path = require('path');
 
 async function runMigrations() {
+    console.log('🔗 Connecting to database...');
+    console.log('Database URL:', process.env.DATABASE_URL ? 'Loaded' : 'NOT LOADED');
+    
     const client = await pool.connect();
     
     try {
