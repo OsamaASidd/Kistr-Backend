@@ -13,4 +13,9 @@ pool.on('error', (err) => {
     console.error('PostgreSQL connection error:', err);
 });
 
+// Add a wrapper to make it compatible with MySQL syntax used in routes
+pool.execute = async function(text, params) {
+    return this.query(text, params);
+};
+
 module.exports = pool;

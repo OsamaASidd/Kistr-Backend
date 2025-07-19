@@ -1,4 +1,5 @@
 const express = require('express');
+const bcrypt = require('bcryptjs'); // Added missing import
 const { body, validationResult, query } = require('express-validator');
 const { authenticateToken } = require('../middleware/auth');
 const pool = require('../config/database');
@@ -24,34 +25,39 @@ router.get('/employees', authenticateToken, [
 
         let whereClause = 'WHERE 1=1';
         let queryParams = [];
+        let paramIndex = 1;
 
         // Add search filter
         if (search) {
-            whereClause += ' AND (name LIKE ? OR email LIKE ? OR position LIKE ?)';
+            whereClause += ` AND (name LIKE $${paramIndex} OR email LIKE $${paramIndex + 1} OR position LIKE $${paramIndex + 2})`;
             const searchTerm = `%${search}%`;
             queryParams.push(searchTerm, searchTerm, searchTerm);
+            paramIndex += 3;
         }
 
         // Add other filters
         if (req.query.department) {
-            whereClause += ' AND department = ?';
+            whereClause += ` AND department = $${paramIndex}`;
             queryParams.push(req.query.department);
+            paramIndex++;
         }
 
         if (req.query.team) {
-            whereClause += ' AND team = ?';
+            whereClause += ` AND team = $${paramIndex}`;
             queryParams.push(req.query.team);
+            paramIndex++;
         }
 
         if (req.query.employee_status) {
-            whereClause += ' AND employee_status = ?';
+            whereClause += ` AND employee_status = $${paramIndex}`;
             queryParams.push(req.query.employee_status);
+            paramIndex++;
         }
 
         // Get total count
         const countQuery = `SELECT COUNT(*) as total FROM users ${whereClause}`;
-        const [countResult] = await pool.execute(countQuery, queryParams);
-        const total = countResult[0].total;
+        const countResult = await pool.query(countQuery, queryParams);
+        const total = parseInt(countResult.rows[0].total);
 
         // Get paginated data
         const dataQuery = `
@@ -60,16 +66,16 @@ router.get('/employees', authenticateToken, [
             FROM users 
             ${whereClause}
             ORDER BY name ASC
-            LIMIT ? OFFSET ?
+            LIMIT $${paramIndex} OFFSET $${paramIndex + 1}
         `;
         
-        const [employees] = await pool.execute(dataQuery, [...queryParams, perPage, offset]);
+        const employees = await pool.query(dataQuery, [...queryParams, perPage, offset]);
 
         const totalPages = Math.ceil(total / perPage);
 
         res.json({
             body: {
-                data: employees,
+                data: employees.rows,
                 meta: {
                     current_page: page,
                     per_page: perPage,
@@ -90,17 +96,17 @@ router.get('/employees', authenticateToken, [
 // Get single employee
 router.get('/employees/:id', authenticateToken, async (req, res) => {
     try {
-        const [employees] = await pool.execute(
-            'SELECT * FROM users WHERE id = ?',
+        const result = await pool.query(
+            'SELECT * FROM users WHERE id = $1',
             [req.params.id]
         );
 
-        if (employees.length === 0) {
+        if (result.rows.length === 0) {
             return res.status(404).json({ message: 'Employee not found' });
         }
 
         res.json({
-            body: employees[0]
+            body: result.rows[0]
         });
     } catch (error) {
         console.error('Get employee error:', error);
@@ -130,13 +136,13 @@ router.post('/employees', authenticateToken, [
         }
 
         // Generate employee ID
-        const [lastEmployee] = await pool.execute(
+        const lastEmployee = await pool.query(
             'SELECT employee_id FROM users ORDER BY id DESC LIMIT 1'
         );
         
         let nextNumber = 1;
-        if (lastEmployee.length > 0 && lastEmployee[0].employee_id) {
-            const lastNumber = parseInt(lastEmployee[0].employee_id.replace('EMP', ''));
+        if (lastEmployee.rows.length > 0 && lastEmployee.rows[0].employee_id) {
+            const lastNumber = parseInt(lastEmployee.rows[0].employee_id.replace('EMP', ''));
             nextNumber = lastNumber + 1;
         }
         
@@ -151,7 +157,8 @@ router.post('/employees', authenticateToken, [
                 employment_type, position, department, team, reporting_manager,
                 city, weekly_hours, contract_start_at, working_time_model,
                 salary_type, base_salary, paid_vacation, onboarding_type
-            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, $18, $19)
+            RETURNING id
         `;
 
         const values = [
@@ -176,18 +183,18 @@ router.post('/employees', authenticateToken, [
             req.body.onboarding_type || null
         ];
 
-        const [result] = await pool.execute(insertQuery, values);
+        const result = await pool.query(insertQuery, values);
 
         res.status(201).json({
             message: 'Employee created successfully',
             body: {
-                id: result.insertId,
+                id: result.rows[0].id,
                 employee_id: employeeId
             }
         });
     } catch (error) {
         console.error('Create employee error:', error);
-        if (error.code === 'ER_DUP_ENTRY') {
+        if (error.code === '23505') { // PostgreSQL unique violation
             return res.status(400).json({ message: 'Email already exists' });
         }
         res.status(500).json({ message: 'Internal server error' });
@@ -202,11 +209,13 @@ router.put('/employees/:id', authenticateToken, async (req, res) => {
         // Build dynamic update query based on update_type
         let updateFields = [];
         let values = [];
+        let paramIndex = 1;
 
         Object.keys(updateData).forEach(key => {
             if (key !== 'id' && updateData[key] !== undefined) {
-                updateFields.push(`${key} = ?`);
+                updateFields.push(`${key} = $${paramIndex}`);
                 values.push(updateData[key]);
+                paramIndex++;
             }
         });
 
@@ -219,12 +228,12 @@ router.put('/employees/:id', authenticateToken, async (req, res) => {
         const updateQuery = `
             UPDATE users 
             SET ${updateFields.join(', ')}, updated_at = CURRENT_TIMESTAMP
-            WHERE id = ?
+            WHERE id = $${paramIndex}
         `;
 
-        const [result] = await pool.execute(updateQuery, values);
+        const result = await pool.query(updateQuery, values);
 
-        if (result.affectedRows === 0) {
+        if (result.rowCount === 0) {
             return res.status(404).json({ message: 'Employee not found' });
         }
 
@@ -238,27 +247,27 @@ router.put('/employees/:id', authenticateToken, async (req, res) => {
 // Get employee filters (for filter dropdowns)
 router.get('/get-employee-filters', authenticateToken, async (req, res) => {
     try {
-        const [departments] = await pool.execute(
+        const departments = await pool.query(
             'SELECT DISTINCT department FROM users WHERE department IS NOT NULL ORDER BY department'
         );
         
-        const [teams] = await pool.execute(
+        const teams = await pool.query(
             'SELECT DISTINCT team FROM users WHERE team IS NOT NULL ORDER BY team'
         );
         
-        const [statuses] = await pool.execute(
+        const statuses = await pool.query(
             'SELECT DISTINCT employee_status FROM users ORDER BY employee_status'
         );
 
         const filters = {
             department: Object.fromEntries(
-                departments.map(d => [d.department.toLowerCase().replace(/\s+/g, '_'), d.department])
+                departments.rows.map(d => [d.department.toLowerCase().replace(/\s+/g, '_'), d.department])
             ),
             team: Object.fromEntries(
-                teams.map(t => [t.team.toLowerCase().replace(/\s+/g, '_'), t.team])
+                teams.rows.map(t => [t.team.toLowerCase().replace(/\s+/g, '_'), t.team])
             ),
             employee_status: Object.fromEntries(
-                statuses.map(s => [s.employee_status, s.employee_status])
+                statuses.rows.map(s => [s.employee_status, s.employee_status])
             )
         };
 

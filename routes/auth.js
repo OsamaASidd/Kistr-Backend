@@ -23,16 +23,16 @@ router.post('/login', [
         const { email, password } = req.body;
 
         // Find user
-        const [users] = await pool.execute(
-            'SELECT id, email, password, name, employee_status FROM users WHERE email = ?',
+        const result = await pool.query(
+            'SELECT id, email, password, name, employee_status FROM users WHERE email = $1',
             [email]
         );
 
-        if (users.length === 0) {
+        if (result.rows.length === 0) {
             return res.status(401).json({ message: 'Invalid credentials' });
         }
 
-        const user = users[0];
+        const user = result.rows[0];
 
         // Check if user is active
         if (user.employee_status !== 'active') {
